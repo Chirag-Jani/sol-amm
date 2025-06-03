@@ -254,7 +254,7 @@ pub mod new_send_swap {
         require!(amount_a >= min_amount_a, AmmError::SlippageExceeded);
         require!(amount_b >= min_amount_b, AmmError::SlippageExceeded);
 
-        // Create signer seeds for all CPIs
+        // Create signer seeds for pool authority
         let seeds = [
             b"pool".as_ref(),
             ctx.accounts.pool.token_a_mint.as_ref(),
@@ -288,16 +288,15 @@ pub mod new_send_swap {
         );
         token::transfer(cpi_ctx_b, amount_b)?;
 
-        // Burn LP tokens
+        // Burn LP tokens - user is the authority for their own tokens
         let cpi_accounts_burn = token::Burn {
             mint: ctx.accounts.lp_mint.to_account_info(),
             from: ctx.accounts.user_lp.to_account_info(),
-            authority: ctx.accounts.pool.to_account_info(),
+            authority: ctx.accounts.user.to_account_info(),
         };
-        let cpi_ctx_burn = CpiContext::new_with_signer(
+        let cpi_ctx_burn = CpiContext::new(
             ctx.accounts.token_program.to_account_info(),
             cpi_accounts_burn,
-            &signer_seeds,
         );
         token::burn(cpi_ctx_burn, lp_amount)?;
 
