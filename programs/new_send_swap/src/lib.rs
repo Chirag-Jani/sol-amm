@@ -137,9 +137,6 @@ pub mod new_send_swap {
     pub fn swap(ctx: Context<Swap>, amount_in: u64, min_amount_out: u64) -> Result<()> {
         let pool = &ctx.accounts.pool;
 
-        // Calculate the amount out based on constant product formula (x * y = k)
-        // In a real implementation, this would account for fees and slippage
-
         // Transfer tokens from user to pool
         let cpi_accounts_in = Transfer {
             from: ctx.accounts.user_token_in.to_account_info(),
@@ -150,7 +147,7 @@ pub mod new_send_swap {
         let cpi_ctx_in = CpiContext::new(cpi_program.clone(), cpi_accounts_in);
         token::transfer(cpi_ctx_in, amount_in)?;
 
-        // Calculate amount out after fees
+        // Calculate fee using existing fee numerator/denominator
         let fee = amount_in
             .checked_mul(pool.fee_numerator)
             .unwrap()
@@ -176,6 +173,28 @@ pub mod new_send_swap {
 
         // Verify minimum amount out
         require!(amount_out >= min_amount_out, AmmError::SlippageExceeded);
+
+        // Transfer fee to owner account
+        if fee > 0 {
+            let cpi_accounts_fee = Transfer {
+                from: ctx.accounts.pool_token_in.to_account_info(),
+                to: ctx.accounts.owner_token_account.to_account_info(),
+                authority: ctx.accounts.pool.to_account_info(),
+            };
+            let seeds = [
+                b"pool".as_ref(),
+                ctx.accounts.pool.token_a_mint.as_ref(),
+                ctx.accounts.pool.token_b_mint.as_ref(),
+                &[ctx.accounts.pool.bump],
+            ];
+            let signer_seeds = [&seeds[..]];
+            let cpi_ctx_fee = CpiContext::new_with_signer(
+                ctx.accounts.token_program.to_account_info(),
+                cpi_accounts_fee,
+                &signer_seeds,
+            );
+            token::transfer(cpi_ctx_fee, fee)?;
+        }
 
         // Transfer tokens from pool to user
         let cpi_accounts_out = Transfer {
@@ -466,6 +485,12 @@ pub struct Swap<'info> {
         constraint = pool_token_out.owner == pool.key(),
     )]
     pub pool_token_out: Account<'info, TokenAccount>,
+
+    #[account(
+        mut,
+        constraint = owner_token_account.mint == token_in_mint.key()
+    )]
+    pub owner_token_account: Account<'info, TokenAccount>,
 
     pub token_program: Program<'info, Token>,
 }

@@ -274,6 +274,16 @@ describe("new_send_swap", () => {
     console.log("userTokenBAccount created:", userTokenBAccount.toString());
     await sleep(2000); // Increased delay to ensure transaction is confirmed
 
+    // Create owner token account to receive fees (using payer as owner for test)
+    const ownerTokenAAccount = await createAssociatedTokenAccount(
+      provider.connection,
+      payer,
+      tokenAMint,
+      payer.publicKey // Using payer as owner since we need to match OWNER_PUBKEY
+    );
+    console.log("ownerTokenAAccount created:", ownerTokenAAccount.toString());
+    await sleep(2000);
+
     // Airdrop SOL to the new account
     const airdropSignature = await provider.connection.requestAirdrop(
       newAccount.publicKey,
@@ -298,6 +308,11 @@ describe("new_send_swap", () => {
     await sleep(2000); // Increased delay to ensure transaction is confirmed
 
     try {
+      // Get initial owner balance to verify fee transfer
+      const initialOwnerBalance =
+        await provider.connection.getTokenAccountBalance(ownerTokenAAccount);
+      console.log("Initial owner balance:", initialOwnerBalance.value.amount);
+
       // Execute the swap
       const minAmountOut = new anchor.BN(90_000_000); // Expect at least 90 tokens out
       const tx = await program.methods
@@ -311,6 +326,7 @@ describe("new_send_swap", () => {
           userTokenOut: userTokenBAccount,
           poolTokenIn: poolAccount.tokenAAccount,
           poolTokenOut: poolAccount.tokenBAccount,
+          ownerTokenAccount: ownerTokenAAccount, // Added owner token account
           tokenProgram: TOKEN_PROGRAM_ID,
         })
         .signers([newAccount])
@@ -332,12 +348,29 @@ describe("new_send_swap", () => {
         await provider.connection.getTokenAccountBalance(
           poolAccount.tokenBAccount
         );
+      const finalOwnerBalance =
+        await provider.connection.getTokenAccountBalance(ownerTokenAAccount);
 
       console.log("\nFinal balances:");
       console.log("User Token A:", finalUserABalance.value.amount);
       console.log("User Token B:", finalUserBBalance.value.amount);
       console.log("Pool Token A:", finalPoolABalance.value.amount);
       console.log("Pool Token B:", finalPoolBBalance.value.amount);
+      console.log("Owner Token A (fees):", finalOwnerBalance.value.amount);
+
+      // Verify owner received fees
+      const ownerReceivedFees =
+        parseInt(finalOwnerBalance.value.amount) -
+        parseInt(initialOwnerBalance.value.amount);
+      console.log("Fees received by owner:", ownerReceivedFees);
+
+      // With 0.3% fee (3/1000), expect fee = 100_000_000 * 3 / 1000 = 300_000
+      const expectedFee = 300_000;
+      assert.equal(
+        ownerReceivedFees,
+        expectedFee,
+        "Owner should receive correct fee amount"
+      );
     } catch (error) {
       console.error("Error executing swap:", error);
 
@@ -360,12 +393,15 @@ describe("new_send_swap", () => {
     }
   });
   it("Removes liquidity from the pool", async () => {
+    console.log("\n=== Starting Remove Liquidity Test ===");
+
     // First verify which account has the LP tokens
+    console.log("\n1. Checking LP token balance...");
     const userLpBalance = await provider.connection.getTokenAccountBalance(
       userLpAccount
     );
-    console.log("LP token account:", userLpAccount.toString());
-    console.log("LP token balance:", userLpBalance.value.amount);
+    console.log("User LP token account:", userLpAccount.toString());
+    console.log("User LP token balance:", userLpBalance.value.amount);
 
     if (userLpBalance.value.amount === "0") {
       throw new Error("No LP tokens found in the account");
@@ -379,12 +415,16 @@ describe("new_send_swap", () => {
     const minTokenB = new anchor.BN(900_000_000); // 90% of 1_000_000_000
 
     try {
-      // Log account states before removal
-      console.log("\nAccount states before removal:");
+      console.log("\n2. Preparing remove liquidity transaction...");
+      console.log("Account states before removal:");
       console.log("Pool address:", poolAddress.toString());
       console.log("User (payer):", payer.publicKey.toString());
       console.log("LP Mint:", lpMint.toString());
       console.log("User LP Account:", userLpAccount.toString());
+      console.log("User Token A Account:", userTokenAAccount.toString());
+      console.log("User Token B Account:", userTokenBAccount.toString());
+      console.log("Pool Token A Account:", poolTokenAAccount.toString());
+      console.log("Pool Token B Account:", poolTokenBAccount.toString());
 
       const tx = await program.methods
         .removeLiquidity(lpAmount, minTokenA, minTokenB)
@@ -396,15 +436,18 @@ describe("new_send_swap", () => {
           poolTokenA: poolTokenAAccount,
           poolTokenB: poolTokenBAccount,
           lpMint,
-          userLp: userLpAccount,
+          userLp: userLpAccount, // Use user's LP account directly
           tokenProgram: TOKEN_PROGRAM_ID,
         })
         .signers([payer])
         .rpc({ commitment: "confirmed" });
 
+      console.log("\n3. Transaction sent:", tx);
       await provider.connection.confirmTransaction(tx, "confirmed");
+      console.log("Transaction confirmed");
       await sleep(2000);
 
+      console.log("\n4. Verifying final balances...");
       // Verify balances after removal
       const finalUserABalance =
         await provider.connection.getTokenAccountBalance(userTokenAAccount);
@@ -427,19 +470,40 @@ describe("new_send_swap", () => {
 
       // Verify LP tokens are burned
       assert.equal(finalLpBalance.value.amount, "0");
+      console.log("✓ LP tokens burned successfully");
 
       // Verify pool is empty
       assert.equal(finalPoolABalance.value.amount, "0");
       assert.equal(finalPoolBBalance.value.amount, "0");
+      console.log("✓ Pool is empty");
 
       // Verify user received their tokens back
       assert.equal(finalUserABalance.value.amount, "1000000000");
       assert.equal(finalUserBBalance.value.amount, "1000000000");
+      console.log("✓ User received tokens back");
     } catch (error) {
-      console.error("Error removing liquidity:", error);
+      console.error("\n❌ Error in remove liquidity test:");
+      console.error("Error type:", error.constructor.name);
+      console.error("Error message:", error.message);
+
       if (error.logs) {
-        console.error("Transaction logs:", error.logs);
+        console.error("\nTransaction logs:");
+        error.logs.forEach((log: string) => console.error(log));
       }
+
+      // Log the current state of accounts
+      console.log("\nAccount states at time of error:");
+      try {
+        const userLpInfo = await provider.connection.getAccountInfo(
+          userLpAccount
+        );
+        const poolInfo = await provider.connection.getAccountInfo(poolAddress);
+        console.log("User LP account exists:", !!userLpInfo);
+        console.log("Pool account exists:", !!poolInfo);
+      } catch (e) {
+        console.error("Error getting account info:", e);
+      }
+
       throw error;
     }
   });
