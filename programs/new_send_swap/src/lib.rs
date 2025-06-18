@@ -1,7 +1,7 @@
 use anchor_lang::prelude::*;
 use anchor_spl::token::{self, Mint, Token, TokenAccount, Transfer};
 
-declare_id!("9D7Q4mab5TnGjHTRxYB9hsShnZKq8S2DiKLU5WLcYNF6");
+declare_id!("8TQfBLPKZZbUSc6JD76UJx8VfnFyFKwinD7yQFAXcDap");
 
 #[error_code]
 pub enum AmmError {
@@ -51,6 +51,68 @@ pub mod new_send_swap {
     ) -> Result<()> {
         let pool = &ctx.accounts.pool;
 
+        // Get pool balances BEFORE transfers
+        let pool_token_a_balance_before = ctx.accounts.pool_token_a.amount;
+        let pool_token_b_balance_before = ctx.accounts.pool_token_b.amount;
+
+        // Calculate LP tokens based on deposit amounts BEFORE transfers
+        let lp_tokens_to_mint =
+            if pool_token_a_balance_before == 0 && pool_token_b_balance_before == 0 {
+                // Initial liquidity - mint minimum amount for first deposit
+                1_000_000 // 1 LP token with 6 decimals
+            } else {
+                // Subsequent liquidity - proportional to existing pool shares
+                let lp_supply = ctx.accounts.lp_mint.supply;
+
+                // Calculate LP tokens for token A using a safer approach
+                let lp_tokens_a = if pool_token_a_balance_before > 0 {
+                    // Use ratio: (amount_a / pool_balance_a) * lp_supply
+                    // This avoids large multiplications
+                    let ratio_numerator = amount_a;
+                    let ratio_denominator = pool_token_a_balance_before;
+
+                    // Calculate: (ratio_numerator * lp_supply) / ratio_denominator
+                    // But do it safely to avoid overflow
+                    if ratio_numerator > 0 && lp_supply > 0 {
+                        // Check if multiplication would overflow
+                        if ratio_numerator > u64::MAX / lp_supply {
+                            return err!(AmmError::ArithmeticOverflow);
+                        }
+                        (ratio_numerator * lp_supply) / ratio_denominator
+                    } else {
+                        0
+                    }
+                } else {
+                    0
+                };
+
+                // Calculate LP tokens for token B using the same safe approach
+                let lp_tokens_b = if pool_token_b_balance_before > 0 {
+                    let ratio_numerator = amount_b;
+                    let ratio_denominator = pool_token_b_balance_before;
+
+                    if ratio_numerator > 0 && lp_supply > 0 {
+                        if ratio_numerator > u64::MAX / lp_supply {
+                            return err!(AmmError::ArithmeticOverflow);
+                        }
+                        (ratio_numerator * lp_supply) / ratio_denominator
+                    } else {
+                        0
+                    }
+                } else {
+                    0
+                };
+
+                // Take the minimum to maintain pool balance
+                std::cmp::min(lp_tokens_a, lp_tokens_b)
+            };
+
+        // Verify minimum LP tokens
+        require!(
+            lp_tokens_to_mint >= min_lp_tokens,
+            AmmError::SlippageExceeded
+        );
+
         // Transfer token A from user to pool
         let cpi_accounts_a = Transfer {
             from: ctx.accounts.user_token_a.to_account_info(),
@@ -69,36 +131,6 @@ pub mod new_send_swap {
         };
         let cpi_ctx_b = CpiContext::new(cpi_program.clone(), cpi_accounts_b);
         token::transfer(cpi_ctx_b, amount_b)?;
-
-        // Calculate LP tokens based on deposit amounts
-        let lp_tokens_to_mint = if ctx.accounts.pool_token_a.amount == 0 {
-            // Initial liquidity - mint minimum amount for first deposit
-            1_000_000 // 1 LP token with 6 decimals
-        } else {
-            // Subsequent liquidity - proportional to existing pool shares
-            let pool_token_a_balance = ctx.accounts.pool_token_a.amount;
-            let pool_token_b_balance = ctx.accounts.pool_token_b.amount;
-
-            // Calculate the proportion based on the smaller ratio to maintain pool balance
-            std::cmp::min(
-                amount_a
-                    .checked_mul(ctx.accounts.lp_mint.supply)
-                    .ok_or(AmmError::ArithmeticOverflow)?
-                    .checked_div(pool_token_a_balance)
-                    .ok_or(AmmError::ArithmeticOverflow)?,
-                amount_b
-                    .checked_mul(ctx.accounts.lp_mint.supply)
-                    .ok_or(AmmError::ArithmeticOverflow)?
-                    .checked_div(pool_token_b_balance)
-                    .ok_or(AmmError::ArithmeticOverflow)?,
-            )
-        };
-
-        // Verify minimum LP tokens
-        require!(
-            lp_tokens_to_mint >= min_lp_tokens,
-            AmmError::SlippageExceeded
-        );
 
         // Mint LP tokens to user
         let pool_seeds = [
@@ -137,7 +169,64 @@ pub mod new_send_swap {
     pub fn swap(ctx: Context<Swap>, amount_in: u64, min_amount_out: u64) -> Result<()> {
         let pool = &ctx.accounts.pool;
 
-        // Transfer tokens from user to pool
+        // Validate input amount
+        require!(amount_in > 0, AmmError::InvalidAmount);
+
+        // Calculate fee using existing fee numerator/denominator
+        let fee = amount_in
+            .checked_mul(pool.fee_numerator)
+            .ok_or(AmmError::ArithmeticOverflow)?
+            .checked_div(pool.fee_denominator)
+            .ok_or(AmmError::ArithmeticOverflow)?;
+
+        let amount_in_after_fee = amount_in
+            .checked_sub(fee)
+            .ok_or(AmmError::ArithmeticOverflow)?;
+
+        // Get current pool balances
+        let pool_token_in_balance = ctx.accounts.pool_token_in.amount;
+        let pool_token_out_balance = ctx.accounts.pool_token_out.amount;
+
+        // Validate pool has sufficient liquidity
+        require!(pool_token_in_balance > 0, AmmError::InvalidAmount);
+        require!(pool_token_out_balance > 0, AmmError::InvalidAmount);
+
+        // Calculate amount_out using constant product formula with overflow protection
+        // Formula: amount_out = (pool_token_out_balance * amount_in_after_fee) / (pool_token_in_balance + amount_in_after_fee)
+
+        // First check if the denominator would overflow
+        let denominator = pool_token_in_balance
+            .checked_add(amount_in_after_fee)
+            .ok_or(AmmError::ArithmeticOverflow)?;
+
+        // Check if the numerator would overflow
+        if pool_token_out_balance > u64::MAX / amount_in_after_fee {
+            return err!(AmmError::ArithmeticOverflow);
+        }
+
+        let numerator = pool_token_out_balance * amount_in_after_fee;
+
+        // Calculate the final amount
+        let amount_out = numerator / denominator;
+
+        // Verify minimum amount out
+        require!(amount_out >= min_amount_out, AmmError::SlippageExceeded);
+
+        // Transfer fee directly from user to owner (before the main transfer)
+        if fee > 0 {
+            let cpi_accounts_fee = Transfer {
+                from: ctx.accounts.user_token_in.to_account_info(),
+                to: ctx.accounts.owner_token_account.to_account_info(),
+                authority: ctx.accounts.user.to_account_info(),
+            };
+            let cpi_ctx_fee = CpiContext::new(
+                ctx.accounts.token_program.to_account_info(),
+                cpi_accounts_fee,
+            );
+            token::transfer(cpi_ctx_fee, fee)?;
+        }
+
+        // Transfer remaining tokens from user to pool (amount_in_after_fee)
         let cpi_accounts_in = Transfer {
             from: ctx.accounts.user_token_in.to_account_info(),
             to: ctx.accounts.pool_token_in.to_account_info(),
@@ -145,65 +234,16 @@ pub mod new_send_swap {
         };
         let cpi_program = ctx.accounts.token_program.to_account_info();
         let cpi_ctx_in = CpiContext::new(cpi_program.clone(), cpi_accounts_in);
-        token::transfer(cpi_ctx_in, amount_in)?;
+        token::transfer(cpi_ctx_in, amount_in_after_fee)?;
 
-        // Calculate fee using existing fee numerator/denominator
-        let fee = amount_in
-            .checked_mul(pool.fee_numerator)
-            .unwrap()
-            .checked_div(pool.fee_denominator)
-            .unwrap();
-
-        let amount_in_after_fee = amount_in.checked_sub(fee).unwrap();
-
-        // Get current pool balances
-        let pool_token_in_balance = ctx.accounts.pool_token_in.amount;
-        let pool_token_out_balance = ctx.accounts.pool_token_out.amount;
-
-        // Calculate amount_out using constant product formula
-        let amount_out = (pool_token_out_balance
-            .checked_mul(amount_in_after_fee)
-            .unwrap())
-        .checked_div(
-            pool_token_in_balance
-                .checked_add(amount_in_after_fee)
-                .unwrap(),
-        )
-        .unwrap();
-
-        // Verify minimum amount out
-        require!(amount_out >= min_amount_out, AmmError::SlippageExceeded);
-
-        // Transfer fee to owner account
-        if fee > 0 {
-            let cpi_accounts_fee = Transfer {
-                from: ctx.accounts.pool_token_in.to_account_info(),
-                to: ctx.accounts.owner_token_account.to_account_info(),
-                authority: ctx.accounts.pool.to_account_info(),
-            };
-            let seeds = [
-                b"pool".as_ref(),
-                ctx.accounts.pool.token_a_mint.as_ref(),
-                ctx.accounts.pool.token_b_mint.as_ref(),
-                &[ctx.accounts.pool.bump],
-            ];
-            let signer_seeds = [&seeds[..]];
-            let cpi_ctx_fee = CpiContext::new_with_signer(
-                ctx.accounts.token_program.to_account_info(),
-                cpi_accounts_fee,
-                &signer_seeds,
-            );
-            token::transfer(cpi_ctx_fee, fee)?;
-        }
-
-        // Transfer tokens from pool to user
+        // Transfer output tokens from pool to user
         let cpi_accounts_out = Transfer {
             from: ctx.accounts.pool_token_out.to_account_info(),
             to: ctx.accounts.user_token_out.to_account_info(),
             authority: ctx.accounts.pool.to_account_info(),
         };
         let seeds = [
-            b"pool".as_ref(),
+            b"pool",
             ctx.accounts.pool.token_a_mint.as_ref(),
             ctx.accounts.pool.token_b_mint.as_ref(),
             &[ctx.accounts.pool.bump],
@@ -237,18 +277,39 @@ pub mod new_send_swap {
     ) -> Result<()> {
         let pool = &ctx.accounts.pool;
 
-        // Calculate proportional amounts of tokens to return
-        let amount_a = (lp_amount
-            .checked_mul(ctx.accounts.pool_token_a.amount)
-            .unwrap())
-        .checked_div(ctx.accounts.lp_mint.supply)
-        .unwrap();
+        // Validate input amount
+        require!(lp_amount > 0, AmmError::InvalidAmount);
 
-        let amount_b = (lp_amount
-            .checked_mul(ctx.accounts.pool_token_b.amount)
-            .unwrap())
-        .checked_div(ctx.accounts.lp_mint.supply)
-        .unwrap();
+        // Get current pool balances and LP supply
+        let pool_token_a_balance = ctx.accounts.pool_token_a.amount;
+        let pool_token_b_balance = ctx.accounts.pool_token_b.amount;
+        let lp_supply = ctx.accounts.lp_mint.supply;
+
+        // Validate LP supply is not zero
+        require!(lp_supply > 0, AmmError::InvalidAmount);
+
+        // Calculate proportional amounts of tokens to return using safer math
+        let amount_a = if lp_amount > 0 && pool_token_a_balance > 0 {
+            // Calculate: (lp_amount * pool_token_a_balance) / lp_supply
+            // Check for overflow before multiplication
+            if lp_amount > u64::MAX / pool_token_a_balance {
+                return err!(AmmError::ArithmeticOverflow);
+            }
+            (lp_amount * pool_token_a_balance) / lp_supply
+        } else {
+            0
+        };
+
+        let amount_b = if lp_amount > 0 && pool_token_b_balance > 0 {
+            // Calculate: (lp_amount * pool_token_b_balance) / lp_supply
+            // Check for overflow before multiplication
+            if lp_amount > u64::MAX / pool_token_b_balance {
+                return err!(AmmError::ArithmeticOverflow);
+            }
+            (lp_amount * pool_token_b_balance) / lp_supply
+        } else {
+            0
+        };
 
         // Verify minimum amounts
         require!(amount_a >= min_amount_a, AmmError::SlippageExceeded);
@@ -332,23 +393,13 @@ pub struct InitializePool<'info> {
     pub token_a_mint: Account<'info, Mint>,
     pub token_b_mint: Account<'info, Mint>,
 
-    #[account(
-        constraint = token_a_account.mint == token_a_mint.key(),
-        constraint = token_a_account.owner == pool.key(),
-    )]
+    #[account(mut)]
     pub token_a_account: Account<'info, TokenAccount>,
 
-    #[account(
-        constraint = token_b_account.mint == token_b_mint.key(),
-        constraint = token_b_account.owner == pool.key(),
-    )]
+    #[account(mut)]
     pub token_b_account: Account<'info, TokenAccount>,
 
     #[account(mut)]
-    // #[account(
-    //     mut,
-    //     constraint = lp_mint.mint_authority.unwrap() == pool.key(),
-    // )]
     pub lp_mint: Account<'info, Mint>,
 
     #[account(mut)]
@@ -374,46 +425,22 @@ pub struct AddLiquidity<'info> {
     #[account(mut)]
     pub user: Signer<'info>,
 
-    #[account(
-        mut,
-        constraint = user_token_a.mint == pool.token_a_mint,
-        constraint = user_token_a.owner == user.key(),
-    )]
+    #[account(mut)]
     pub user_token_a: Account<'info, TokenAccount>,
 
-    #[account(
-        mut,
-        constraint = user_token_b.mint == pool.token_b_mint,
-        constraint = user_token_b.owner == user.key(),
-    )]
+    #[account(mut)]
     pub user_token_b: Account<'info, TokenAccount>,
 
-    #[account(
-        mut,
-        constraint = pool_token_a.mint == pool.token_a_mint,
-        constraint = pool_token_a.key() == pool.token_a_account,
-    )]
+    #[account(mut)]
     pub pool_token_a: Account<'info, TokenAccount>,
 
-    #[account(
-        mut,
-        constraint = pool_token_b.mint == pool.token_b_mint,
-        constraint = pool_token_b.key() == pool.token_b_account,
-    )]
+    #[account(mut)]
     pub pool_token_b: Account<'info, TokenAccount>,
 
-    #[account(
-        mut,
-        constraint = lp_mint.key() == pool.lp_mint,
-    )]
+    #[account(mut)]
     pub lp_mint: Account<'info, Mint>,
 
-    #[account(
-        mut,
-        constraint = user_lp.mint == pool.lp_mint,
-        constraint = user_lp.owner == user.key(),
-        constraint = user_lp.delegate.is_none(),
-    )]
+    #[account(mut)]
     pub user_lp: Account<'info, TokenAccount>,
 
     pub token_program: Program<'info, Token>,
@@ -434,61 +461,25 @@ pub struct Swap<'info> {
     #[account(mut)]
     pub user: Signer<'info>,
 
-    #[account(
-        constraint = (
-            token_in_mint.key() == pool.token_a_mint ||
-            token_in_mint.key() == pool.token_b_mint
-        ),
-    )]
+    #[account(mut)]
     pub token_in_mint: Account<'info, Mint>,
 
-    #[account(
-        constraint = (
-            token_out_mint.key() == pool.token_a_mint ||
-            token_out_mint.key() == pool.token_b_mint
-        ),
-        constraint = token_out_mint.key() != token_in_mint.key(),
-    )]
+    #[account(mut)]
     pub token_out_mint: Account<'info, Mint>,
 
-    #[account(
-        mut,
-        constraint = user_token_in.mint == token_in_mint.key(),
-        constraint = user_token_in.owner == user.key(),
-    )]
+    #[account(mut)]
     pub user_token_in: Account<'info, TokenAccount>,
 
-    #[account(
-        mut,
-        constraint = user_token_out.mint == token_out_mint.key(),
-        constraint = user_token_out.owner == user.key(),
-    )]
+    #[account(mut)]
     pub user_token_out: Account<'info, TokenAccount>,
 
-    #[account(
-        mut,
-        constraint = (
-            (token_in_mint.key() == pool.token_a_mint && pool_token_in.key() == pool.token_a_account) ||
-            (token_in_mint.key() == pool.token_b_mint && pool_token_in.key() == pool.token_b_account)
-        ),
-        constraint = pool_token_in.owner == pool.key(),
-    )]
+    #[account(mut)]
     pub pool_token_in: Account<'info, TokenAccount>,
 
-    #[account(
-        mut,
-        constraint = (
-            (token_out_mint.key() == pool.token_a_mint && pool_token_out.key() == pool.token_a_account) ||
-            (token_out_mint.key() == pool.token_b_mint && pool_token_out.key() == pool.token_b_account)
-        ),
-        constraint = pool_token_out.owner == pool.key(),
-    )]
+    #[account(mut)]
     pub pool_token_out: Account<'info, TokenAccount>,
 
-    #[account(
-        mut,
-        constraint = owner_token_account.mint == token_in_mint.key()
-    )]
+    #[account(mut)]
     pub owner_token_account: Account<'info, TokenAccount>,
 
     pub token_program: Program<'info, Token>,
@@ -509,47 +500,22 @@ pub struct RemoveLiquidity<'info> {
     #[account(mut)]
     pub user: Signer<'info>,
 
-    #[account(
-        mut,
-        constraint = user_token_a.mint == pool.token_a_mint,
-        constraint = user_token_a.owner == user.key(),
-    )]
+    #[account(mut)]
     pub user_token_a: Account<'info, TokenAccount>,
 
-    #[account(
-        mut,
-        constraint = user_token_b.mint == pool.token_b_mint,
-        constraint = user_token_b.owner == user.key(),
-    )]
+    #[account(mut)]
     pub user_token_b: Account<'info, TokenAccount>,
 
-    #[account(
-        mut,
-        constraint = pool_token_a.mint == pool.token_a_mint,
-        constraint = pool_token_a.key() == pool.token_a_account,
-    )]
+    #[account(mut)]
     pub pool_token_a: Account<'info, TokenAccount>,
 
-    #[account(
-        mut,
-        constraint = pool_token_b.mint == pool.token_b_mint,
-        constraint = pool_token_b.key() == pool.token_b_account,
-    )]
+    #[account(mut)]
     pub pool_token_b: Account<'info, TokenAccount>,
 
-    #[account(
-        mut,
-        constraint = lp_mint.key() == pool.lp_mint,
-        constraint = lp_mint.mint_authority.unwrap() == pool.key(),
-    )]
+    #[account(mut)]
     pub lp_mint: Account<'info, Mint>,
 
-    #[account(
-        mut,
-        constraint = user_lp.mint == pool.lp_mint,
-        constraint = user_lp.owner == user.key(),
-        constraint = user_lp.delegate.is_none(),
-    )]
+    #[account(mut)]
     pub user_lp: Account<'info, TokenAccount>,
 
     pub token_program: Program<'info, Token>,
