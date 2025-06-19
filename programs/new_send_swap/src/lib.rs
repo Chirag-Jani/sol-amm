@@ -1,7 +1,7 @@
 use anchor_lang::prelude::*;
 use anchor_spl::token::{self, Mint, Token, TokenAccount, Transfer};
 
-declare_id!("8TQfBLPKZZbUSc6JD76UJx8VfnFyFKwinD7yQFAXcDap");
+declare_id!("AEJA8mS2Qh7Z1uzzDfBDnB5FU1QFyosnu6jGFSoecB4v");
 
 #[error_code]
 pub enum AmmError {
@@ -63,22 +63,47 @@ pub mod new_send_swap {
             } else {
                 // Subsequent liquidity - proportional to existing pool shares
                 let lp_supply = ctx.accounts.lp_mint.supply;
+                let lp_decimals = ctx.accounts.lp_mint.decimals;
 
-                // Calculate LP tokens for token A using a safer approach
-                let lp_tokens_a = if pool_token_a_balance_before > 0 {
-                    // Use ratio: (amount_a / pool_balance_a) * lp_supply
-                    // This avoids large multiplications
-                    let ratio_numerator = amount_a;
-                    let ratio_denominator = pool_token_a_balance_before;
+                // Get token decimals from the mint accounts
+                let token_a_decimals = ctx.accounts.token_a_mint.decimals;
+                let token_b_decimals = ctx.accounts.token_b_mint.decimals;
 
-                    // Calculate: (ratio_numerator * lp_supply) / ratio_denominator
-                    // But do it safely to avoid overflow
-                    if ratio_numerator > 0 && lp_supply > 0 {
-                        // Check if multiplication would overflow
-                        if ratio_numerator > u64::MAX / lp_supply {
+                // Normalize amounts to a common decimal base (using LP token decimals as reference)
+                // Formula: normalized_amount = raw_amount * (10^lp_decimals) / (10^token_decimals)
+                let normalize_amount = |raw_amount: u64, token_decimals: u8| -> Result<u64> {
+                    if token_decimals == lp_decimals {
+                        Ok(raw_amount)
+                    } else if token_decimals > lp_decimals {
+                        // Token has more decimals than LP, so divide
+                        let divisor = 10u64.pow((token_decimals - lp_decimals) as u32);
+                        Ok(raw_amount / divisor)
+                    } else {
+                        // Token has fewer decimals than LP, so multiply
+                        let multiplier = 10u64.pow((lp_decimals - token_decimals) as u32);
+                        if raw_amount > u64::MAX / multiplier {
                             return err!(AmmError::ArithmeticOverflow);
                         }
-                        (ratio_numerator * lp_supply) / ratio_denominator
+                        Ok(raw_amount * multiplier)
+                    }
+                };
+
+                // Normalize the amounts
+                let normalized_amount_a = normalize_amount(amount_a, token_a_decimals)?;
+                let normalized_amount_b = normalize_amount(amount_b, token_b_decimals)?;
+                let normalized_pool_a =
+                    normalize_amount(pool_token_a_balance_before, token_a_decimals)?;
+                let normalized_pool_b =
+                    normalize_amount(pool_token_b_balance_before, token_b_decimals)?;
+
+                // Calculate LP tokens for token A using normalized amounts
+                let lp_tokens_a = if normalized_pool_a > 0 {
+                    if normalized_amount_a > 0 && lp_supply > 0 {
+                        // Check if multiplication would overflow
+                        if normalized_amount_a > u64::MAX / lp_supply {
+                            return err!(AmmError::ArithmeticOverflow);
+                        }
+                        (normalized_amount_a * lp_supply) / normalized_pool_a
                     } else {
                         0
                     }
@@ -86,16 +111,13 @@ pub mod new_send_swap {
                     0
                 };
 
-                // Calculate LP tokens for token B using the same safe approach
-                let lp_tokens_b = if pool_token_b_balance_before > 0 {
-                    let ratio_numerator = amount_b;
-                    let ratio_denominator = pool_token_b_balance_before;
-
-                    if ratio_numerator > 0 && lp_supply > 0 {
-                        if ratio_numerator > u64::MAX / lp_supply {
+                // Calculate LP tokens for token B using normalized amounts
+                let lp_tokens_b = if normalized_pool_b > 0 {
+                    if normalized_amount_b > 0 && lp_supply > 0 {
+                        if normalized_amount_b > u64::MAX / lp_supply {
                             return err!(AmmError::ArithmeticOverflow);
                         }
-                        (ratio_numerator * lp_supply) / ratio_denominator
+                        (normalized_amount_b * lp_supply) / normalized_pool_b
                     } else {
                         0
                     }
@@ -425,6 +447,9 @@ pub struct AddLiquidity<'info> {
     #[account(mut)]
     pub user: Signer<'info>,
 
+    pub token_a_mint: Account<'info, Mint>,
+    pub token_b_mint: Account<'info, Mint>,
+
     #[account(mut)]
     pub user_token_a: Account<'info, TokenAccount>,
 
@@ -499,6 +524,9 @@ pub struct RemoveLiquidity<'info> {
 
     #[account(mut)]
     pub user: Signer<'info>,
+
+    pub token_a_mint: Account<'info, Mint>,
+    pub token_b_mint: Account<'info, Mint>,
 
     #[account(mut)]
     pub user_token_a: Account<'info, TokenAccount>,

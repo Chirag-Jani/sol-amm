@@ -391,6 +391,8 @@ describe("new_send_swap - Comprehensive Test Suite", () => {
         .accounts({
           pool: poolAddress,
           user: payer.publicKey,
+          tokenAMint,
+          tokenBMint,
           userTokenA: userTokenAAccount,
           userTokenB: userTokenBAccount,
           poolTokenA: poolTokenAAccount,
@@ -442,6 +444,8 @@ describe("new_send_swap - Comprehensive Test Suite", () => {
         .accounts({
           pool: poolAddress,
           user: payer.publicKey,
+          tokenAMint,
+          tokenBMint,
           userTokenA: userTokenAAccount,
           userTokenB: userTokenBAccount,
           poolTokenA: poolTokenAAccount,
@@ -496,6 +500,8 @@ describe("new_send_swap - Comprehensive Test Suite", () => {
         .accounts({
           pool: poolAddress,
           user: payer.publicKey,
+          tokenAMint,
+          tokenBMint,
           userTokenA: userTokenAAccount,
           userTokenB: userTokenBAccount,
           poolTokenA: poolTokenAAccount,
@@ -525,6 +531,8 @@ describe("new_send_swap - Comprehensive Test Suite", () => {
           .accounts({
             pool: poolAddress,
             user: payer.publicKey,
+            tokenAMint,
+            tokenBMint,
             userTokenA: userTokenAAccount,
             userTokenB: userTokenBAccount,
             poolTokenA: poolTokenAAccount,
@@ -568,6 +576,8 @@ describe("new_send_swap - Comprehensive Test Suite", () => {
         .accounts({
           pool: poolAddress,
           user: payer.publicKey,
+          tokenAMint,
+          tokenBMint,
           userTokenA: userTokenAAccount,
           userTokenB: userTokenBAccount,
           poolTokenA: poolTokenAAccount,
@@ -610,6 +620,8 @@ describe("new_send_swap - Comprehensive Test Suite", () => {
           .accounts({
             pool: poolAddress,
             user: payer.publicKey,
+            tokenAMint,
+            tokenBMint,
             userTokenA: userTokenAAccount,
             userTokenB: userTokenBAccount,
             poolTokenA: poolTokenAAccount,
@@ -939,6 +951,8 @@ describe("new_send_swap - Comprehensive Test Suite", () => {
         .accounts({
           pool: poolAddress,
           user: payer.publicKey,
+          tokenAMint,
+          tokenBMint,
           userTokenA: userTokenAAccount,
           userTokenB: userTokenBAccount,
           poolTokenA: poolTokenAAccount,
@@ -958,6 +972,8 @@ describe("new_send_swap - Comprehensive Test Suite", () => {
           .accounts({
             pool: poolAddress,
             user: payer.publicKey,
+            tokenAMint,
+            tokenBMint,
             userTokenA: userTokenAAccount,
             userTokenB: userTokenBAccount,
             poolTokenA: poolTokenAAccount,
@@ -1009,6 +1025,8 @@ describe("new_send_swap - Comprehensive Test Suite", () => {
         .accounts({
           pool: poolAddress,
           user: payer.publicKey,
+          tokenAMint,
+          tokenBMint,
           userTokenA: userTokenAAccount,
           userTokenB: userTokenBAccount,
           poolTokenA: poolTokenAAccount,
@@ -1041,6 +1059,8 @@ describe("new_send_swap - Comprehensive Test Suite", () => {
           .accounts({
             pool: poolAddress,
             user: payer.publicKey,
+            tokenAMint,
+            tokenBMint,
             userTokenA: userTokenAAccount,
             userTokenB: userTokenBAccount,
             poolTokenA: poolTokenAAccount,
@@ -1075,6 +1095,8 @@ describe("new_send_swap - Comprehensive Test Suite", () => {
         .accounts({
           pool: poolAddress,
           user: user.publicKey,
+          tokenAMint,
+          tokenBMint,
           userTokenA,
           userTokenB,
           poolTokenA: poolTokenAAccount,
@@ -1157,6 +1179,8 @@ describe("new_send_swap - Comprehensive Test Suite", () => {
           .accounts({
             pool: poolAddress,
             user: user.publicKey,
+            tokenAMint,
+            tokenBMint,
             userTokenA,
             userTokenB,
             poolTokenA: poolTokenAAccount,
@@ -1191,6 +1215,8 @@ describe("new_send_swap - Comprehensive Test Suite", () => {
         .accounts({
           pool: poolAddress,
           user: user.publicKey,
+          tokenAMint,
+          tokenBMint,
           userTokenA,
           userTokenB,
           poolTokenA: poolTokenAAccount,
