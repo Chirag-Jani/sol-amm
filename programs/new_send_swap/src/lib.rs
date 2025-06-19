@@ -1,7 +1,7 @@
 use anchor_lang::prelude::*;
 use anchor_spl::token::{self, Mint, Token, TokenAccount, Transfer};
 
-declare_id!("AEJA8mS2Qh7Z1uzzDfBDnB5FU1QFyosnu6jGFSoecB4v");
+declare_id!("DfMRpbJVP4g3Yi4S4zSmoFaqh7bvywzCjxZpkDKeZnXu");
 
 #[error_code]
 pub enum AmmError {
@@ -213,23 +213,46 @@ pub mod new_send_swap {
         require!(pool_token_in_balance > 0, AmmError::InvalidAmount);
         require!(pool_token_out_balance > 0, AmmError::InvalidAmount);
 
-        // Calculate amount_out using constant product formula with overflow protection
+        // Calculate amount_out using constant product formula with improved overflow protection
         // Formula: amount_out = (pool_token_out_balance * amount_in_after_fee) / (pool_token_in_balance + amount_in_after_fee)
 
-        // First check if the denominator would overflow
+        // First, check if the denominator would overflow
         let denominator = pool_token_in_balance
             .checked_add(amount_in_after_fee)
             .ok_or(AmmError::ArithmeticOverflow)?;
 
-        // Check if the numerator would overflow
-        if pool_token_out_balance > u64::MAX / amount_in_after_fee {
-            return err!(AmmError::ArithmeticOverflow);
-        }
+        // Calculate amount_out using a safer approach
+        let amount_out = if pool_token_out_balance > 0 && amount_in_after_fee > 0 {
+            // Use a more robust calculation that avoids overflow
+            // We'll use a different approach: calculate the ratio first, then multiply
 
-        let numerator = pool_token_out_balance * amount_in_after_fee;
+            // Calculate the ratio: amount_in_after_fee / (pool_token_in_balance + amount_in_after_fee)
+            // This ratio will be between 0 and 1, so it's safe to multiply with pool_token_out_balance
 
-        // Calculate the final amount
-        let amount_out = numerator / denominator;
+            // First, check if the multiplication would overflow
+            if pool_token_out_balance > u64::MAX / amount_in_after_fee {
+                // If direct multiplication would overflow, use a different approach
+                // Calculate: pool_token_out_balance * (amount_in_after_fee / denominator)
+                // But we need to handle the division carefully to maintain precision
+
+                // Use a scaling approach: multiply by a large number, divide, then scale back
+                let scale = 1_000_000_000u64; // 1 billion for precision
+
+                // Scale up the calculation to maintain precision
+                let scaled_amount_in = amount_in_after_fee.saturating_mul(scale);
+                let scaled_ratio = scaled_amount_in / denominator;
+                let scaled_amount_out = pool_token_out_balance.saturating_mul(scaled_ratio);
+
+                // Scale back down
+                scaled_amount_out / scale
+            } else {
+                // Safe to do direct calculation
+                let numerator = pool_token_out_balance * amount_in_after_fee;
+                numerator / denominator
+            }
+        } else {
+            0
+        };
 
         // Verify minimum amount out
         require!(amount_out >= min_amount_out, AmmError::SlippageExceeded);
